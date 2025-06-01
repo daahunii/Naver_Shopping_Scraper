@@ -1,8 +1,8 @@
 import requests
 import json
 
-CLIENT_ID = "TslSB2EtDRRaX0RpzoM7"       # 🔐 발급받은 ID
-CLIENT_SECRET = "O2noGteTaV"  # 🔐 발급받은 시크릿
+CLIENT_ID = "T"       # 🔐 발급받은 ID -> 임의로 넣음
+CLIENT_SECRET = "O"  # 🔐 발급받은 시크릿 -> 임의로 넣음
 
 def search_naver_shopping(query, display=5):
     url = "https://openapi.naver.com/v1/search/shop.json"
