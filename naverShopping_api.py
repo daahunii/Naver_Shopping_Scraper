@@ -1,104 +1,76 @@
-from flask import Flask, request, jsonify
-import requests
+"""Giftoyou shopping API. Credentials are supplied by the server environment."""
+import hmac
+import os
 import re
+from flask import Flask, jsonify, request
+from werkzeug.exceptions import HTTPException
+from naverShopping import ShoppingAPIError, search_naver_shopping
 
 app = Flask(__name__)
-
-# 🔐 네이버 API 정보
-CLIENT_ID = "TslSB2EtDRRaX0RpzoM7"
-CLIENT_SECRET = "O2noGteTaV"
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
 
 def clean_keyword(raw_keyword):
-    """
-    괄호 안의 내용 및 특수문자 제거하여 검색어를 정리합니다.
-    """
-    cleaned = re.sub(r"\(.*?\)", "", raw_keyword)  # 괄호 내용 제거
-    cleaned = re.sub(r"[&(),]", "", cleaned)       # 특수문자 제거
-    return cleaned.strip()
+    if not isinstance(raw_keyword, str) or not 1 <= len(raw_keyword) <= 200:
+        raise ValueError("Each keyword must contain 1 to 200 characters")
+    cleaned = re.sub(r"\(.*?\)", "", raw_keyword)
+    cleaned = re.sub(r"[&(),]", "", cleaned).strip()
+    if not cleaned:
+        raise ValueError("Keyword is empty after normalization")
+    return cleaned
 
 
-def search_naver_shopping(query, display=3):
-    """
-    네이버 쇼핑 API를 사용해 query에 대한 검색 결과를 반환합니다.
-    """
-    url = "https://openapi.naver.com/v1/search/shop.json"
-    headers = {
-        "X-Naver-Client-Id": CLIENT_ID,
-        "X-Naver-Client-Secret": CLIENT_SECRET,
-    }
-    params = {
-        "query": query,
-        "display": display,
-        "start": 1,
-        "sort": "sim",  # 관련도순
-    }
-
-    response = requests.get(url, headers=headers, params=params)
-
-    if response.status_code == 200:
-        data = response.json()
-        results = []
-        for item in data["items"]:
-            results.append({
-                "title": item["title"],
-                "link": item["link"],
-                "image": item["image"],
-                "lprice": item["lprice"],
-                "mallName": item["mallName"],
-            })
-        return results
-    else:
-        print("❌ API 호출 실패:", response.status_code, response.text)
-        return []
+@app.before_request
+def authenticate():
+    token = os.environ.get("SHOPPING_API_TOKEN", "")
+    if token and request.path != "/":
+        supplied = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
+            return jsonify({"error": "Unauthorized"}), 401
 
 
-# ✅ 루트 안내 페이지
-@app.route('/')
+@app.errorhandler(ValueError)
+def invalid_input(error):
+    return jsonify({"error": str(error)}), 400
+
+
+@app.errorhandler(ShoppingAPIError)
+def upstream_error(error):
+    return jsonify({"error": "Shopping provider unavailable"}), 502
+
+
+@app.errorhandler(HTTPException)
+def http_error(error):
+    return jsonify({"error": error.name}), error.code
+
+
+@app.route("/")
 def index():
-    return '''
-    <h2>🛍️ Naver 쇼핑 검색 API</h2>
-    <p>이 API는 키워드로 네이버 쇼핑 상품 데이터를 가져옵니다.</p>
-    <h3>✅ 단일 검색:</h3>
-    <pre><code>GET /search?query=천체망원경</code></pre>
-    <h3>✅ 다중 검색 (POST):</h3>
-    <pre><code>POST /recommend  {"keywords": ["키워드1", "키워드2", ...]}</code></pre>
-    '''
+    return jsonify({"service": "Naver Shopping API", "endpoints": ["GET /search", "POST /recommend"]})
 
 
-# ✅ 단일 검색
-@app.route('/search', methods=['GET'])
+@app.route("/search", methods=["GET"])
 def naver_shopping_api():
-    query = request.args.get('query')
-    if not query:
-        return jsonify({"error": "Missing 'query' parameter"}), 400
-
-    items = search_naver_shopping(clean_keyword(query))
-    return jsonify(items)
+    query = clean_keyword(request.args.get("query"))
+    return jsonify(search_naver_shopping(query, display=3))
 
 
-# ✅ 다중 키워드 검색 (제미나이 추천용)
-@app.route('/recommend', methods=['POST'])
+@app.route("/recommend", methods=["POST"])
 def recommend_multiple():
-    try:
-        data = request.get_json()
-        keywords = data.get("keywords", [])
-        count = data.get("count", 3)
-
-        results = {}
-        for keyword in keywords:
-            safe_query = clean_keyword(keyword)
-            print(f"🔍 검색어: {safe_query}")
-            items = search_naver_shopping(safe_query, display=count)
-            results[keyword] = items
-
-        return jsonify(results)
-
-    except Exception as e:
-        print("❌ recommend 오류:", e)
-        return jsonify({"error": str(e)}), 500
+    data = request.get_json()
+    if not isinstance(data, dict):
+        raise ValueError("JSON body must be an object")
+    keywords = data.get("keywords")
+    count = data.get("count", 3)
+    if not isinstance(keywords, list) or not 1 <= len(keywords) <= 10:
+        raise ValueError("keywords must be an array of 1 to 10 strings")
+    if type(count) is not int or not 1 <= count <= 100:
+        raise ValueError("count must be an integer from 1 to 100")
+    # Validate the entire request before consuming provider quota.
+    queries = [(keyword, clean_keyword(keyword)) for keyword in keywords]
+    return jsonify({keyword: search_naver_shopping(query, display=count)
+                    for keyword, query in queries})
 
 
-# ✅ 서버 실행
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8081)
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=8081, debug=False)
